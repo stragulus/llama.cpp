@@ -1,3 +1,7 @@
+#ifdef GGML_USE_CUDA
+#    include "ggml-cuda.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -137,6 +141,21 @@ static std::string get_gpu_info() {
         }
     }
     return join(gpu_list, ", ");
+}
+
+static size_t get_vram_used() {
+#ifdef GGML_USE_CUDA
+    size_t total_used   = 0;
+    int    device_count = ggml_backend_cuda_get_device_count();
+    for (int i = 0; i < device_count; i++) {
+        size_t free, total;
+        ggml_backend_cuda_get_device_memory(i, &free, &total);
+        total_used += (total - free);
+    }
+    return total_used;
+#else
+    return 0;
+#endif
 }
 
 static std::vector<ggml_backend_dev_t> parse_devices_arg(const std::string & value) {
@@ -1416,6 +1435,8 @@ struct test {
     int                      n_depth;
     std::string              test_time;
     std::vector<uint64_t>    samples_ns;
+    size_t                   vram_start;
+    size_t                   vram_end;
 
     test(const cmd_params_instance & inst, const llama_model * lmodel, const llama_context * ctx) :
         cpu_info(get_cpu_info()),
@@ -1510,7 +1531,8 @@ struct test {
             "tensor_buft_overrides",            "use_mmap",      "use_direct_io",  "embeddings",
             "no_op_offload",  "no_host",        "fit_target",     "fit_min_ctx",
             "n_prompt",       "n_gen",          "n_depth",
-            "test_time",      "avg_ns",         "stddev_ns",     "avg_ts",         "stddev_ts"
+            "test_time",      "avg_ns",         "stddev_ns",     "avg_ts",         "stddev_ts",
+            "vram_start",     "vram_end"
         };
         return fields;
     }
@@ -1522,7 +1544,8 @@ struct test {
             field == "poll" || field == "model_size" || field == "model_n_params" || field == "n_gpu_layers" ||
             field == "main_gpu" || field == "n_prompt" || field == "n_gen" || field == "n_depth" || field == "avg_ns" ||
             field == "stddev_ns" || field == "no_op_offload" || field == "n_cpu_moe" ||
-            field == "fit_target" || field == "fit_min_ctx") {
+            field == "fit_target" || field == "fit_min_ctx" ||
+            field == "vram_start" || field == "vram_end") {
             return INT;
         }
         if (field == "f16_kv" || field == "no_kv_offload" || field == "cpu_strict" || field == "flash_attn" ||
@@ -1612,7 +1635,9 @@ struct test {
                                             std::to_string(avg_ns()),
                                             std::to_string(stdev_ns()),
                                             std::to_string(avg_ts()),
-                                            std::to_string(stdev_ts()) };
+                                            std::to_string(stdev_ts()),
+                                            std::to_string(vram_start),
+                                            std::to_string(vram_end) };
         return values;
     }
 
@@ -1799,6 +1824,9 @@ struct markdown_printer : public printer {
         if (field == "no_host") {
             return 4;
         }
+        if (field == "vram_start" || field == "vram_end") {
+            return 12;
+        }
 
         int width = std::max((int) field.length(), 10);
 
@@ -1847,6 +1875,12 @@ struct markdown_printer : public printer {
         }
         if (field == "tensor_buft_overrides") {
             return "ot";
+        }
+        if (field == "vram_start") {
+            return "VRAM start";
+        }
+        if (field == "vram_end") {
+            return "VRAM end";
         }
         if (field == "fit_target") {
             return "fitt";
@@ -1939,6 +1973,8 @@ struct markdown_printer : public printer {
             fields.emplace_back("fit_min_ctx");
         }
         fields.emplace_back("test");
+        fields.emplace_back("vram_start");
+        fields.emplace_back("vram_end");
         fields.emplace_back("t/s");
 
         fprintf(fout, "|");
@@ -1990,6 +2026,20 @@ struct markdown_printer : public printer {
                 if (t.n_depth > 0) {
                     int len = strlen(buf);
                     snprintf(buf + len, sizeof(buf) - len, " @ d%d", t.n_depth);
+                }
+                value = buf;
+            } else if (field == "vram_start") {
+                if (t.vram_start < 1024 * 1024 * 1024) {
+                    snprintf(buf, sizeof(buf), "%.0f MiB", t.vram_start / 1024.0 / 1024.0);
+                } else {
+                    snprintf(buf, sizeof(buf), "%.1f GiB", t.vram_start / 1024.0 / 1024.0 / 1024.0);
+                }
+                value = buf;
+            } else if (field == "vram_end") {
+                if (t.vram_end < 1024 * 1024 * 1024) {
+                    snprintf(buf, sizeof(buf), "%.0f MiB", t.vram_end / 1024.0 / 1024.0);
+                } else {
+                    snprintf(buf, sizeof(buf), "%.1f GiB", t.vram_end / 1024.0 / 1024.0 / 1024.0);
                 }
                 value = buf;
             } else if (field == "t/s") {
@@ -2270,6 +2320,9 @@ int main(int argc, char ** argv) {
 
         llama_memory_clear(llama_get_memory(ctx), false);
 
+        // capture VRAM usage after model load, before prompt processing
+        t.vram_start = get_vram_used();
+
         // cool off before the test
         if (params.delay) {
             std::this_thread::sleep_for(std::chrono::seconds(params.delay));
@@ -2397,6 +2450,9 @@ int main(int argc, char ** argv) {
             uint64_t t_ns = get_time_ns() - t_start;
             t.samples_ns.push_back(t_ns);
         }
+
+        // capture VRAM usage at the end of the test, before clearing
+        t.vram_end   = get_vram_used();
 
         if (p) {
             p->print_test(t);

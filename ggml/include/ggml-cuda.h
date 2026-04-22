@@ -45,6 +45,8 @@ GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
 
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);
 
+GGML_BACKEND_API size_t ggml_backend_cuda_get_gpu_pool_size(int device);
+
 #ifdef  __cplusplus
 }
 #endif

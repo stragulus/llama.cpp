@@ -464,6 +464,10 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
         CUDA_CHECK(cudaFree(ptr));
         pool_size -= size;
     }
+
+    size_t get_pool_size() const override {
+        return pool_size;
+    }
 };
 
 // pool with virtual memory
@@ -573,6 +577,10 @@ struct ggml_cuda_pool_vmm : public ggml_cuda_pool {
 
         // all deallocations must be in reverse order of the allocations
         GGML_ASSERT(ptr == (void *) ((char *)(pool_addr) + pool_used));
+    }
+
+    size_t get_pool_size() const override {
+        return pool_size;
     }
 };
 #endif // defined(GGML_USE_VMM)
@@ -4555,6 +4563,32 @@ void ggml_backend_cuda_get_device_memory(int device, size_t * free, size_t * tot
     ggml_cuda_set_device(device);
 
     CUDA_CHECK(cudaMemGetInfo(free, total));
+}
+
+size_t ggml_backend_cuda_get_gpu_pool_size(int device) {
+    ggml_backend_t backend = ggml_backend_cuda_init(device);
+    if (backend == nullptr) {
+        return 0;
+    }
+
+    ggml_backend_cuda_context * ctx = static_cast<ggml_backend_cuda_context *>(backend->context);
+    if (ctx == nullptr) {
+        ggml_backend_free(backend);
+        return 0;
+    }
+
+    ggml_cuda_pool * pool = nullptr;
+    if (ctx->pools[device][ctx->curr_stream_no] != nullptr) {
+        pool = ctx->pools[device][ctx->curr_stream_no].get();
+    }
+
+    size_t result = 0;
+    if (pool != nullptr) {
+        result = pool->get_pool_size();
+    }
+
+    ggml_backend_free(backend);
+    return result;
 }
 
 bool ggml_backend_cuda_register_host_buffer(void * buffer, size_t size) {
